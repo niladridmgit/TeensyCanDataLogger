@@ -14,6 +14,10 @@
 
 ![alt text](https://github.com/niladridmgit/TeensyCanDataLogger/blob/main/images/BlockDiagram.JPG)
 
+**SD Card Connection**
+
+![alt text](https://github.com/niladridmgit/TeensyCanDataLogger/blob/main/images/SD_CARD_Connection.JPG)
+
 ## **Demo Video:**
 
 [![Demo](https://img.youtube.com/vi/bFs53gjJ5pw/0.jpg)](https://youtu.be/bFs53gjJ5pw)
