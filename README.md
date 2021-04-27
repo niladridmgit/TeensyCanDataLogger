@@ -1,5 +1,5 @@
 # Teensy CAN Data Logger
-CAN Data Logger main components are:
+## CAN Data Logger main components are:
 
               1. Teensy 4.0 (Link: https://www.pjrc.com/store/teensy40.html)
               2. TJA1050 CAN Transceiver(Link: https://www.amazon.com/KNACRO-TJA1050-controller-interface-module/dp/B01FX3ROZM)
@@ -10,6 +10,6 @@ CAN Data Logger main components are:
               7. Push Switch
               8. PCM5102 DAC for future use (optional)
 
-**Block Diagram:**
+## **Block Diagram:**
 
 ![alt text](https://github.com/niladridmgit/TeensyCanDataLogger/blob/main/images/BlockDiagram.JPG)
