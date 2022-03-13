@@ -1,4 +1,3 @@
-#include <FlexCAN_T4.h>
 #include <TimeLib.h>
 #include <Bounce.h>
 #include <Arduino.h>
@@ -7,9 +6,10 @@
 #include <Wire.h>
 #include "SdFat.h"
 #include "RingBuf.h"
+#include <FlexCAN_T4.h>  // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
 
-//U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(/* reset=*/ U8X8_PIN_NONE);
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+// initialize CAN //
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can0;
 
 #define LOG_FILE_SIZE_SD 10485760 // 10mb
