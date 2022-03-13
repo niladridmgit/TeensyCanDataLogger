@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include "SdFat.h"
 #include "RingBuf.h"
+#include <TinyGPSPlus.h>
 #include <TinyMPU6050.h>
 #include <FlexCAN_T4.h>  // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
 
@@ -53,6 +54,9 @@ uint32_t newFileCount = 0;
 Bounce logButton = Bounce(LOG_BTN, 15); // 15 = 15 ms debounce time
 bool log_enable = false;
 
+TinyGPSPlus gps;
+
+
 // Function prtotype declaration //
 void initSD_card();
 void stopLogging();
@@ -61,7 +65,9 @@ void digitalClockDisplay();
 void printDigits(int digits);
 unsigned long processSyncMessage();
 void printDisplay();
-void MPUDisplay();
+void displayMsgOled();
+void parseGpsNmea();
+void sensorDataWrite(uint8_t sensortype);
 
 char disp_msg_1[20] = { "Please Wait" };
 char disp_msg_2[20] = { " " };
@@ -77,7 +83,13 @@ struct mpu6050
   
 }mpu_6050_sensor;
 
-MPU6050 mpu (Wire1);
+struct GPSLocation
+{
+  float gps_lat;
+  float gps_lng;
+}GPS_Location;
+
+MPU6050 mpu (Wire1); //SCL1(16), SDA1(17)//
 
 time_t getTeensy3Time();
 
@@ -91,18 +103,26 @@ void setup(void) {
 
 	Serial.begin(115200); delay(400);
 
-	u8g2.begin();
-	u8g2.clearBuffer();          // clear the internal memory
+	u8g2.begin();          //SCL0(19), SDA0(18)//
+	u8g2.clearBuffer();    // clear the internal memory
 
  // Initialization
   mpu.Initialize();
 
   // Calibration
-  Serial.begin(115200);
+  Serial.begin(115200); // Debug and Config
+  Serial2.begin(9600);  // GPS Module Pin7 Rx, Pin8 Tx as per https://www.pjrc.com/teensy/td_uart.html
+  
+  Serial.println("=====================================");
+  Serial.println("GPS NEO-6M Setting");
+  sprintf(disp_msg_1, "GPS conf %s", "InProgress");
+  displayMsgOled();
+  gpsSetting();
+  
   Serial.println("=====================================");
   Serial.println("Starting MPU6050 calibration.........");
   sprintf(disp_msg_1, "MPU6050 %s", "calibration");
-  MPUDisplay();
+  displayMsgOled();
   mpu.Calibrate();
   Serial.println("Calibration complete!");
   Serial.println("Offsets:");
@@ -122,7 +142,8 @@ void setup(void) {
 
 	digitalClockDisplay();
 	delay(1000);
-
+  
+  Serial.println("=====================================");
 	Can0.begin();
 	Can0.setBaudRate(500000);
 	Can0.setMaxMB(16);
@@ -130,6 +151,31 @@ void setup(void) {
 	Can0.enableFIFOInterrupt();
 	Can0.onReceive(canSniff);
 	Can0.mailboxStatus();
+
+}
+
+void gpsSetting()
+{
+  delay(1000);
+  byte GGA_off[26] = {0xb5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xf0, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x01, 0x00, 0x24, 0xb5, 0x62, 0x06, 0x01,0x02, 0x00, 0xf0, 0x00, 0xf9, 0x11 };
+  Serial2.write(GGA_off, sizeof(GGA_off));  
+  delay(1000);
+  byte GLL_off[26] = {0xb5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xf0, 0x01, 0x00, 0x00,0x00, 0x00, 0x00, 0x01, 0x01, 0x2b, 0xb5, 0x62, 0x06, 0x01,0x02, 0x00, 0xf0, 0x01, 0xfa, 0x12 };
+  Serial2.write(GLL_off, sizeof(GLL_off));
+  delay(1000);
+  byte GSA_off[26] = {0xb5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xf0, 0x02, 0x00, 0x00,0x00, 0x00, 0x00, 0x01, 0x02, 0x32, 0xb5, 0x62, 0x06, 0x01,0x02, 0x00, 0xf0, 0x02, 0xfb, 0x13 };
+  Serial2.write(GSA_off, sizeof(GSA_off));
+  delay(1000);
+  byte GSV_off[26] = {0xb5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xf0, 0x03, 0x00, 0x00,0x00, 0x00, 0x00, 0x01, 0x03, 0x39, 0xb5, 0x62, 0x06, 0x01,0x02, 0x00, 0xf0, 0x03, 0xfc, 0x14 };
+  Serial2.write(GSV_off, sizeof(GSV_off));
+  delay(1000);
+  byte VTG_off[26] = {0xb5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xf0, 0x05, 0x00, 0x00,0x00, 0x00, 0x00, 0x01, 0x05, 0x47, 0xb5, 0x62, 0x06, 0x01,0x02, 0x00, 0xf0, 0x05, 0xfe, 0x16 };
+  Serial2.write(VTG_off, sizeof(VTG_off));
+  delay(1000);
+  byte save_config[29] = {0xb5, 0x62, 0x06, 0x09, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x1d,0xab, 0xb5, 0x62, 0x0a, 0x04, 0x00,0x00,0x0e,0x34 };
+  Serial2.write(save_config, sizeof(save_config));
+  delay(1000);
+  Serial2.flush();
 
 }
 
@@ -159,7 +205,7 @@ void printDisplay()
 	u8g2.sendBuffer();          // transfer internal memory to the display
 }
 
-void MPUDisplay()
+void displayMsgOled()
 {
   Serial.println(disp_msg_1);
   printDisplay();
@@ -275,7 +321,7 @@ void canSniff(const CAN_message_t& msg) {
 	}
 }
 
-void sensorDataWrite() {
+void sensorDataWrite(uint8_t sensortype) {
 
   if (!log_enable)
     return;
@@ -300,9 +346,19 @@ void sensorDataWrite() {
   }
 
   CAN_message_t sensorData;
-  sensorData.id = 0x701;
   sensorData.len = 8;
-  memcpy(sensorData.buf,(uint8_t*)(&mpu_6050_sensor),sizeof(mpu_6050_sensor));
+  
+  if(sensortype==0)
+  {
+    sensorData.id = 0x701;
+    memcpy(sensorData.buf,(uint8_t*)(&mpu_6050_sensor),sizeof(mpu_6050_sensor));
+  }
+  else if(sensortype==1)
+  {
+    sensorData.id = 0x702;
+    memcpy(sensorData.buf,(uint8_t*)(&GPS_Location),sizeof(GPS_Location));
+  }
+ 
   Serial.print(" ");
   Serial.print(timeStamp, 6);
   Serial.print("  ");
@@ -367,6 +423,25 @@ void startLogging()
 	initSD_card();
 }
 
+void parseGpsNmea()
+{
+  Serial.print(F("Location: ")); 
+  if (gps.location.isValid())
+  {
+    GPS_Location.gps_lat= (float)gps.location.lat();
+    Serial.print(GPS_Location.gps_lat,6);
+    Serial.print(F(","));
+    GPS_Location.gps_lng= (float)gps.location.lng();
+    Serial.print(GPS_Location.gps_lng, 6);
+    sensorDataWrite(1);
+  }
+  else
+  {
+    Serial.print(F("INVALID"));
+  }
+  Serial.println();
+}
+
 
 void loop() {
 
@@ -397,7 +472,7 @@ void loop() {
     mpu_6050_sensor.angleZ_Yaw=(int16_t)(mpu.GetAngZ());
     //Serial.println(mpu_6050_sensor.angleZ_Yaw);
     mpu6050_task = millis();
-    sensorDataWrite();  
+    sensorDataWrite(0);  
   }
   
 	logButton.update();
@@ -430,4 +505,10 @@ void loop() {
 		}
 		time_now = millis();
 	}
+
+  while (Serial2.available() > 0)
+  {
+      if (gps.encode(Serial2.read()))
+        parseGpsNmea();
+  }
 }
