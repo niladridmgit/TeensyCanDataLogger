@@ -1,16 +1,19 @@
 #include <TimeLib.h>
 #include <Bounce.h>
 #include <Arduino.h>
-//#include <U8x8lib.h>
 #include <U8g2lib.h>
 #include <Wire.h>
 #include "SdFat.h"
 #include "RingBuf.h"
+#include <TinyMPU6050.h>
 #include <FlexCAN_T4.h>  // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
 
+// initialize i2c oled display //
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 // initialize CAN //
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can0;
+
+#define TIME_HEADER  "T"   // Header tag for serial time sync message
 
 #define LOG_FILE_SIZE_SD 10485760 // 10mb
 
@@ -45,15 +48,20 @@ unsigned long time_now = 0;
 
 uint32_t logFileSize = 0;
 uint32_t newFileCount = 0;
+
+// Button Initialization //
 Bounce logButton = Bounce(LOG_BTN, 15); // 15 = 15 ms debounce time
 bool log_enable = false;
+
+// Function prtotype declaration //
 void initSD_card();
 void stopLogging();
 void startLogging();
 void digitalClockDisplay();
 void printDigits(int digits);
-//void printDisplay(uint8_t x_pos, uint8_t y_pos, const char* msg);
+unsigned long processSyncMessage();
 void printDisplay();
+void MPUDisplay();
 
 char disp_msg_1[20] = { "Please Wait" };
 char disp_msg_2[20] = { " " };
@@ -61,8 +69,19 @@ char disp_msg_3[20] = { " " };
 char disp_msg_4[20] = { " " };
 char disp_msg_5[20] = { " " };
 
+struct mpu6050
+{
+  int16_t angleX_pitch;
+  int16_t angleY_roll;
+  int16_t angleZ_Yaw;
+  
+}mpu_6050_sensor;
+
+MPU6050 mpu (Wire1);
+
 time_t getTeensy3Time();
 
+unsigned long mpu6050_task = 0;
 
 void setup(void) {
 
@@ -71,13 +90,28 @@ void setup(void) {
 	setSyncProvider(getTeensy3Time);
 
 	Serial.begin(115200); delay(400);
-	//pinMode(6, OUTPUT); digitalWrite(6, LOW); /* optional tranceiver enable pin */
-
-	//u8x8.begin();
-	//u8x8.setPowerSave(0);
 
 	u8g2.begin();
 	u8g2.clearBuffer();          // clear the internal memory
+
+ // Initialization
+  mpu.Initialize();
+
+  // Calibration
+  Serial.begin(115200);
+  Serial.println("=====================================");
+  Serial.println("Starting MPU6050 calibration.........");
+  sprintf(disp_msg_1, "MPU6050 %s", "calibration");
+  MPUDisplay();
+  mpu.Calibrate();
+  Serial.println("Calibration complete!");
+  Serial.println("Offsets:");
+  Serial.print("GyroX Offset = ");
+  Serial.println(mpu.GetGyroXOffset());
+  Serial.print("GyroY Offset = ");
+  Serial.println(mpu.GetGyroYOffset());
+  Serial.print("GyroZ Offset = ");
+  Serial.println(mpu.GetGyroZOffset());
 
 	if (timeStatus() != timeSet) {
 		Serial.println("Unable to sync with the RTC");
@@ -99,6 +133,20 @@ void setup(void) {
 
 }
 
+unsigned long processSyncMessage() {
+  unsigned long pctime = 0L;
+  const unsigned long DEFAULT_TIME = 1646932827; //2022
+
+  if(Serial.find(TIME_HEADER)) {
+     pctime = Serial.parseInt();
+     return pctime;
+     if( pctime < DEFAULT_TIME) { // check the value is a valid time (greater than Jan 1 2013)
+       pctime = 0L; // return 0 to indicate that the time is not valid
+     }
+  }
+  return pctime;
+}
+
 void printDisplay()
 {
 	u8g2.clearBuffer();
@@ -111,10 +159,16 @@ void printDisplay()
 	u8g2.sendBuffer();          // transfer internal memory to the display
 }
 
+void MPUDisplay()
+{
+  Serial.println(disp_msg_1);
+  printDisplay();
+}
+
 void digitalClockDisplay()
 {
 	sprintf(disp_msg_1, "%02d:%02d:%02d %02d/%02d/%04d", hour(), minute(), second(), day(), month(), year());
-	Serial.println(disp_msg_1);
+	//Serial.println(disp_msg_1);
 	printDisplay();
 }
 
@@ -139,20 +193,16 @@ void initSD_card()
 	}
 	// Open or create file - truncate existing file.
 	char file_name[50] = { "" };
-	//String fileName = "CANLOG_" + String(hour()) + String(minute()) + String(second()) + String(day()) + String(month()) + String(year());
 	sprintf(file_name, "log_%02d%02d%02d_%02d%02d%04d", hour(), minute(), second(), day(), month(), year());
 	Serial.print("FileName: ");
 	Serial.println(file_name);
 	strncpy(disp_msg_3, file_name, 19);
 	disp_msg_4[0] = '\0';
-	//int str_len = fileName.length() + 1;
-	//fileName.toCharArray(file_name, str_len);
 	if (!file.open((const char*)file_name, O_RDWR | O_CREAT | O_TRUNC)) {
 		Serial.println("open failed\n");
 		return;
 	}
-	// File must be pre-allocated to avoid huge
-	// delays searching for free clusters.
+	// File must be pre-allocated to avoid huge delays searching for free clusters.
 	if (!file.preAllocate(LOG_FILE_SIZE)) {
 		Serial.println("preAllocate failed\n");
 		file.close();
@@ -225,6 +275,70 @@ void canSniff(const CAN_message_t& msg) {
 	}
 }
 
+void sensorDataWrite() {
+
+  if (!log_enable)
+    return;
+    
+  double timeStamp = double((double)elapselogtime / 1000000);  //micros()
+  size_t n = rb.bytesUsed();
+  logFileSize = (uint32_t)n + (uint32_t)file.curPosition();
+  if ((n + file.curPosition()) > (LOG_FILE_SIZE - 20)) {
+    Serial.println("File full - quiting.");
+    return;
+  }
+  if (n > maxUsed) {
+    maxUsed = n;
+  }
+  if (n >= 512 && !file.isBusy()) {
+    // Not busy only allows one sector before possible busy wait.
+    // Write one sector from RingBuf to file.
+    if (512 != rb.writeOut(512)) {
+      Serial.println("writeOut failed");
+      return;
+    }
+  }
+
+  CAN_message_t sensorData;
+  sensorData.id = 0x701;
+  sensorData.len = 8;
+  memcpy(sensorData.buf,(uint8_t*)(&mpu_6050_sensor),sizeof(mpu_6050_sensor));
+  Serial.print(" ");
+  Serial.print(timeStamp, 6);
+  Serial.print("  ");
+  Serial.print("1");
+  Serial.print("      ");
+  Serial.print(sensorData.id, HEX);
+  Serial.print("  Rx d ");
+  Serial.print(sensorData.len);
+  Serial.print(" ");
+  for (uint8_t i = 0; i < sensorData.len; i++) {
+    Serial.print(sensorData.buf[i], HEX); Serial.print(" ");
+    Serial.print(" ");
+  }
+  Serial.println();
+  
+  rb.print(" ");
+  rb.print(timeStamp, 6);
+  rb.print("  ");
+  rb.print("1");
+  rb.print("      ");
+  rb.print(sensorData.id, HEX);
+  rb.print("  Rx d ");
+  rb.print(sensorData.len);
+  rb.print(" ");
+  for (uint8_t i = 0; i < sensorData.len; i++) {
+    rb.print(sensorData.buf[i], HEX);
+    rb.print(" ");
+  }
+  rb.println();
+  if (rb.getWriteError()) {
+    // Error caused by too few free bytes in RingBuf.
+    Serial.println("WriteError");
+    return;
+  }
+}
+
 void stopLogging()
 {
 	log_enable = false;
@@ -255,7 +369,37 @@ void startLogging()
 
 
 void loop() {
+
+  if (!log_enable)
+  {
+    if (Serial.available()) {
+      time_t t = processSyncMessage();
+      if (t != 0) {
+        Teensy3Clock.set(t); // set the RTC
+        setTime(t);
+        Serial.println("Time Set Success!");
+        
+      }
+    }
+  }
+  
 	Can0.events();
+  
+  mpu.Execute();
+  if((millis()-mpu6050_task)>100){ // print data every 100ms
+    //Serial.print("AngX = ");
+    mpu_6050_sensor.angleX_pitch=(int16_t)(mpu.GetAngX());
+    //Serial.print(mpu_6050_sensor.angleX_pitch);
+    //Serial.print("  AngY = ");
+    mpu_6050_sensor.angleY_roll=(int16_t)(mpu.GetAngY());
+    //Serial.print(mpu_6050_sensor.angleY_roll);
+    //Serial.print("  AngZ = ");
+    mpu_6050_sensor.angleZ_Yaw=(int16_t)(mpu.GetAngZ());
+    //Serial.println(mpu_6050_sensor.angleZ_Yaw);
+    mpu6050_task = millis();
+    sensorDataWrite();  
+  }
+  
 	logButton.update();
 	if (logButton.fallingEdge()) {
 		if (!log_enable)
@@ -274,7 +418,8 @@ void loop() {
 		digitalClockDisplay();
 		if(log_enable)
 		{
-			sprintf(disp_msg_4, "FileSize: %ld", logFileSize);
+      int fsize = (int)((uint32_t)logFileSize/1024);
+			sprintf(disp_msg_4, "FileSize: %d Kb", fsize);
 			if (logFileSize >= LOG_FILE_SIZE_SD)
 			{
 				stopLogging();
