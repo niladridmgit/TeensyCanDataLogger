@@ -56,6 +56,8 @@ bool log_enable = false;
 
 TinyGPSPlus gps;
 
+bool rtcSync = false;
+
 
 // Function prtotype declaration //
 void initSD_card();
@@ -433,13 +435,63 @@ void parseGpsNmea()
     Serial.print(F(","));
     GPS_Location.gps_lng= (float)gps.location.lng();
     Serial.print(GPS_Location.gps_lng, 6);
+    sprintf(disp_msg_3, "lat: %.6f", GPS_Location.gps_lat);
+    sprintf(disp_msg_4, "lng: %.6f", GPS_Location.gps_lng);
     sensorDataWrite(1);
   }
   else
   {
     Serial.print(F("INVALID"));
   }
+  Serial.print(F("  Date/Time: "));
+  if (gps.date.isValid())
+  {
+    Serial.print(gps.date.month());
+    Serial.print(F("/"));
+    Serial.print(gps.date.day());
+    Serial.print(F("/"));
+    Serial.print(gps.date.year());
+  }
+  else
+  {
+    Serial.print(F("INVALID"));
+  }
+
+  Serial.print(F(" "));
+  if (gps.time.isValid())
+  {
+    if (gps.time.hour() < 10) Serial.print(F("0"));
+    Serial.print(gps.time.hour());
+    Serial.print(F(":"));
+    if (gps.time.minute() < 10) Serial.print(F("0"));
+    Serial.print(gps.time.minute());
+    Serial.print(F(":"));
+    if (gps.time.second() < 10) Serial.print(F("0"));
+    Serial.print(gps.time.second());
+    //Serial.print(F("."));
+    //if (gps.time.centisecond() < 10) Serial.print(F("0"));
+    //Serial.print(gps.time.centisecond());
+    
+    sprintf(disp_msg_2, "%02d:%02d:%02d %02d/%02d/%04d", gps.time.hour(), gps.time.minute(), gps.time.second(), gps.date.day(), gps.date.month(), gps.date.year());
+    if(!rtcSync)
+    {
+      setTime((int)gps.time.hour(),(int)gps.time.minute(),(int)gps.time.second(),(int)gps.date.day(), (int)gps.date.month(), (int)gps.date.year());
+      time_t t= now()+19800;
+      setTime(t);
+      Serial.print(" ...time:");
+      Serial.println(t);
+      Teensy3Clock.set(t);
+      rtcSync=true;
+      
+    }
+  }
+  else
+  {
+    Serial.print(F("INVALID"));
+  }
+
   Serial.println();
+  sprintf(disp_msg_5, "X: %d, Y: %d, Z: %d", mpu_6050_sensor.angleX_pitch,mpu_6050_sensor.angleY_roll,mpu_6050_sensor.angleX_pitch);
 }
 
 
