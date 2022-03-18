@@ -1,13 +1,65 @@
 #include <TimeLib.h>
-#include <Bounce.h>
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
 #include "SdFat.h"
 #include "RingBuf.h"
+#include "SD.h"
+#include "MTP.h"
 #include <TinyGPSPlus.h>
 #include <TinyMPU6050.h>
 #include <FlexCAN_T4.h>  // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
+
+#define USE_SD  1         // SDFAT based SDIO and SPI
+
+#if USE_EVENTS==1
+  extern "C" int usb_init_events(void);
+#else
+  int usb_init_events(void) {}
+#endif
+
+
+
+#if defined(__IMXRT1062__)
+  // following only as long usb_mtp is not included in cores
+  #if !__has_include("usb_mtp.h")
+    #include "usb1_mtp.h"
+  #endif
+#else
+  #ifndef BUILTIN_SDCARD 
+    #define BUILTIN_SDCARD 254
+  #endif
+  void usb_mtp_configure(void) {}
+#endif
+
+
+/****  Start device specific change area  ****/
+// SDClasses 
+#if USE_SD==1
+  // edit SPI to reflect your configuration (following is for T4.1)
+  #define SD_MOSI 11
+  #define SD_MISO 12
+  #define SD_SCK  13
+
+  #define SPI_SPEED SD_SCK_MHZ(33)  // adjust to sd card 
+
+  #if defined (BUILTIN_SDCARD)
+    const char *sd_str[]={"logger","sd1"}; // edit to reflect your configuration
+    const int cs[] = {BUILTIN_SDCARD,10}; // edit to reflect your configuration
+  #else
+    const char *sd_str[]={"sd1"}; // edit to reflect your configuration
+    const int cs[] = {10}; // edit to reflect your configuration
+  #endif
+  const int nsd = sizeof(sd_str)/sizeof(const char *);
+
+SDClass sdx[nsd];
+#endif
+
+
+MTPStorage_SD storage;
+MTPD    mtpd(&storage);
+
+bool mtp_enable =false;
 
 // initialize i2c oled display //
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
@@ -50,8 +102,8 @@ unsigned long time_now = 0;
 uint32_t logFileSize = 0;
 uint32_t newFileCount = 0;
 
-// Button Initialization //
-Bounce logButton = Bounce(LOG_BTN, 15); // 15 = 15 ms debounce time
+#define TRIGGER_PIN LOG_BTN
+
 bool log_enable = false;
 
 TinyGPSPlus gps;
@@ -70,6 +122,9 @@ void printDisplay();
 void displayMsgOled();
 void parseGpsNmea();
 void sensorDataWrite(uint8_t sensortype);
+void storage_configure();
+void checkButton();
+void displayMsgOled_generic(char *msg);
 
 char disp_msg_1[20] = { "Please Wait" };
 char disp_msg_2[20] = { " " };
@@ -99,60 +154,60 @@ unsigned long mpu6050_task = 0;
 
 void setup(void) {
 
-	pinMode(LOG_BTN, INPUT_PULLUP);
-	pinMode(LED_PIN, OUTPUT);
-	setSyncProvider(getTeensy3Time);
+  pinMode(LOG_BTN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  setSyncProvider(getTeensy3Time);
 
-	Serial.begin(115200); delay(400);
-
-	u8g2.begin();          //SCL0(19), SDA0(18)//
-	u8g2.clearBuffer();    // clear the internal memory
+  u8g2.begin();          //SCL0(19), SDA0(18)//
+  u8g2.clearBuffer();    // clear the internal memory
 
  // Initialization
   mpu.Initialize();
 
   // Calibration
-  Serial.begin(115200); // Debug and Config
+  Serial7.begin(115200); // Debug and Config
   Serial2.begin(9600);  // GPS Module Pin7 Rx, Pin8 Tx as per https://www.pjrc.com/teensy/td_uart.html
+
+  delay(400);
   
-  Serial.println("=====================================");
-  Serial.println("GPS NEO-6M Setting");
+  Serial7.println("=====================================");
+  Serial7.println("GPS NEO-6M Setting");
   sprintf(disp_msg_1, "GPS conf %s", "InProgress");
   displayMsgOled();
   gpsSetting();
   
-  Serial.println("=====================================");
-  Serial.println("Starting MPU6050 calibration.........");
+  Serial7.println("=====================================");
+  Serial7.println("Starting MPU6050 calibration.........");
   sprintf(disp_msg_1, "MPU6050 %s", "calibration");
   displayMsgOled();
   mpu.Calibrate();
-  Serial.println("Calibration complete!");
-  Serial.println("Offsets:");
-  Serial.print("GyroX Offset = ");
-  Serial.println(mpu.GetGyroXOffset());
-  Serial.print("GyroY Offset = ");
-  Serial.println(mpu.GetGyroYOffset());
-  Serial.print("GyroZ Offset = ");
-  Serial.println(mpu.GetGyroZOffset());
+  Serial7.println("Calibration complete!");
+  Serial7.println("Offsets:");
+  Serial7.print("GyroX Offset = ");
+  Serial7.println(mpu.GetGyroXOffset());
+  Serial7.print("GyroY Offset = ");
+  Serial7.println(mpu.GetGyroYOffset());
+  Serial7.print("GyroZ Offset = ");
+  Serial7.println(mpu.GetGyroZOffset());
 
-	if (timeStatus() != timeSet) {
-		Serial.println("Unable to sync with the RTC");
-	}
-	else {
-		Serial.println("RTC has set the system time");
-	}
+  if (timeStatus() != timeSet) {
+    Serial7.println("Unable to sync with the RTC");
+  }
+  else {
+    Serial7.println("RTC has set the system time");
+  }
 
-	digitalClockDisplay();
-	delay(1000);
+  digitalClockDisplay();
+  delay(1000);
   
-  Serial.println("=====================================");
-	Can0.begin();
-	Can0.setBaudRate(500000);
-	Can0.setMaxMB(16);
-	Can0.enableFIFO();
-	Can0.enableFIFOInterrupt();
-	Can0.onReceive(canSniff);
-	Can0.mailboxStatus();
+  Serial7.println("=====================================");
+  Can0.begin();
+  Can0.setBaudRate(500000);
+  Can0.setMaxMB(16);
+  Can0.enableFIFO();
+  Can0.enableFIFOInterrupt();
+  Can0.onReceive(canSniff);
+  Can0.mailboxStatus();
 
 }
 
@@ -185,8 +240,8 @@ unsigned long processSyncMessage() {
   unsigned long pctime = 0L;
   const unsigned long DEFAULT_TIME = 1646932827; //2022
 
-  if(Serial.find(TIME_HEADER)) {
-     pctime = Serial.parseInt();
+  if(Serial7.find(TIME_HEADER)) {
+     pctime = Serial7.parseInt();
      return pctime;
      if( pctime < DEFAULT_TIME) { // check the value is a valid time (greater than Jan 1 2013)
        pctime = 0L; // return 0 to indicate that the time is not valid
@@ -197,130 +252,141 @@ unsigned long processSyncMessage() {
 
 void printDisplay()
 {
-	u8g2.clearBuffer();
-	u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-	u8g2.drawStr(2, 12, (const char*)disp_msg_1);
-	u8g2.drawStr(2, 24, (const char*)disp_msg_2);
-	u8g2.drawStr(2, 36, (const char*)disp_msg_3);
-	u8g2.drawStr(2, 48, (const char*)disp_msg_4);
-	u8g2.drawStr(2, 60, (const char*)disp_msg_5);
-	u8g2.sendBuffer();          // transfer internal memory to the display
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+  u8g2.drawStr(2, 12, (const char*)disp_msg_1);
+  u8g2.drawStr(2, 24, (const char*)disp_msg_2);
+  u8g2.drawStr(2, 36, (const char*)disp_msg_3);
+  u8g2.drawStr(2, 48, (const char*)disp_msg_4);
+  u8g2.drawStr(2, 60, (const char*)disp_msg_5);
+  u8g2.sendBuffer();          // transfer internal memory to the display
+}
+
+void displayMsgOled_generic(char *msg)
+{
+  memset(disp_msg_1,'\0',20);
+  memset(disp_msg_2,'\0',20);
+  memset(disp_msg_3,'\0',20);
+  memset(disp_msg_4,'\0',20);
+  memset(disp_msg_5,'\0',20);
+  sprintf(disp_msg_2, "%s", msg);
+  printDisplay();
 }
 
 void displayMsgOled()
 {
-  Serial.println(disp_msg_1);
+  Serial7.println(disp_msg_1);
   printDisplay();
 }
 
 void digitalClockDisplay()
 {
-	sprintf(disp_msg_1, "%02d:%02d:%02d %02d/%02d/%04d", hour(), minute(), second(), day(), month(), year());
-	//Serial.println(disp_msg_1);
-	printDisplay();
+  sprintf(disp_msg_1, "%02d:%02d:%02d %02d/%02d/%04d", hour(), minute(), second(), day(), month(), year());
+  //Serial7.println(disp_msg_1);
+  printDisplay();
 }
 
 time_t getTeensy3Time()
 {
-	return Teensy3Clock.get();
+  return Teensy3Clock.get();
 }
 
 void printDigits(int digits) {
-	// utility function for digital clock display: prints preceding colon and leading 0
-	Serial.print(":");
-	if (digits < 10)
-		Serial.print('0');
-	Serial.print(digits);
+  // utility function for digital clock display: prints preceding colon and leading 0
+  Serial7.print(":");
+  if (digits < 10)
+    Serial7.print('0');
+  Serial7.print(digits);
 }
 
 void initSD_card()
 {
-	// Initialize the SD.
-	if (!sd.begin(SD_CONFIG)) {
-		sd.initErrorHalt(&Serial);
-	}
-	// Open or create file - truncate existing file.
-	char file_name[50] = { "" };
-	sprintf(file_name, "log_%02d%02d%02d_%02d%02d%04d", hour(), minute(), second(), day(), month(), year());
-	Serial.print("FileName: ");
-	Serial.println(file_name);
-	strncpy(disp_msg_3, file_name, 19);
-	disp_msg_4[0] = '\0';
-	if (!file.open((const char*)file_name, O_RDWR | O_CREAT | O_TRUNC)) {
-		Serial.println("open failed\n");
-		return;
-	}
-	// File must be pre-allocated to avoid huge delays searching for free clusters.
-	if (!file.preAllocate(LOG_FILE_SIZE)) {
-		Serial.println("preAllocate failed\n");
-		file.close();
-		return;
-	}
-	// initialize the RingBuf.
-	rb.begin(&file);
+  // Initialize the SD.
+  if (!sd.begin(SD_CONFIG)) {
+    sd.initErrorHalt(&Serial);
+  }
+  // Open or create file - truncate existing file.
+  char file_name[50] = { "" };
+  sprintf(file_name, "log_%02d%02d%02d_%02d%02d%04d", hour(), minute(), second(), day(), month(), year());
+  Serial7.print("FileName: ");
+  Serial7.println(file_name);
+  strncpy(disp_msg_3, file_name, 19);
+  disp_msg_4[0] = '\0';
+  if (!file.open((const char*)file_name, O_RDWR | O_CREAT | O_TRUNC)) {
+    Serial7.println("open failed\n");
+    return;
+  }
+  // File must be pre-allocated to avoid huge delays searching for free clusters.
+  if (!file.preAllocate(LOG_FILE_SIZE)) {
+    Serial7.println("preAllocate failed\n");
+    file.close();
+    return;
+  }
+  // initialize the RingBuf.
+  rb.begin(&file);
 }
 
 void canSniff(const CAN_message_t& msg) {
-	//Serial.print("MB "); Serial.print(msg.mb);
-	//Serial.print("  OVERRUN: "); Serial.print(msg.flags.overrun);
-	//Serial.print(" EXT: "); Serial.print(msg.flags.extended);
-	//Serial.print(" TS: "); Serial.print(msg.timestamp);
-	Serial.print(" ");
-	double timeStamp = double((double)elapselogtime / 1000000);  //micros()
-	Serial.print(timeStamp, 6);
-	Serial.print("  ");
-	Serial.print("1");
-	Serial.print("      ");
-	Serial.print(msg.id, HEX);
-	Serial.print("  Rx d ");
-	Serial.print(msg.len);
-	Serial.print(" ");
-	for (uint8_t i = 0; i < msg.len; i++) {
-		Serial.print(msg.buf[i], HEX); Serial.print(" ");
-		Serial.print(" ");
-	}
-	Serial.println();
+  //Serial7.print("MB "); Serial7.print(msg.mb);
+  //Serial7.print("  OVERRUN: "); Serial7.print(msg.flags.overrun);
+  //Serial7.print(" EXT: "); Serial7.print(msg.flags.extended);
+  //Serial7.print(" TS: "); Serial7.print(msg.timestamp);
+  Serial7.print(" ");
+  double timeStamp = double((double)elapselogtime / 1000000);  //micros()
+  Serial7.print(timeStamp, 6);
+  Serial7.print("  ");
+  Serial7.print("1");
+  Serial7.print("      ");
+  Serial7.print(msg.id, HEX);
+  Serial7.print("  Rx d ");
+  Serial7.print(msg.len);
+  Serial7.print(" ");
+  for (uint8_t i = 0; i < msg.len; i++) {
+    Serial7.print(msg.buf[i], HEX); Serial7.print(" ");
+    Serial7.print(" ");
+  }
+  Serial7.println();
 
-	size_t n = rb.bytesUsed();
-	logFileSize = (uint32_t)n + (uint32_t)file.curPosition();
-	if ((n + file.curPosition()) > (LOG_FILE_SIZE - 20)) {
-		Serial.println("File full - quiting.");
-		return;
-	}
-	if (n > maxUsed) {
-		maxUsed = n;
-	}
-	if (n >= 512 && !file.isBusy()) {
-		// Not busy only allows one sector before possible busy wait.
-		// Write one sector from RingBuf to file.
-		if (512 != rb.writeOut(512)) {
-			Serial.println("writeOut failed");
-			return;
-		}
-	}
+  size_t n = rb.bytesUsed();
+  logFileSize = (uint32_t)n + (uint32_t)file.curPosition();
+  if ((n + file.curPosition()) > (LOG_FILE_SIZE - 20)) {
+    Serial7.println("File full - quiting.");
+    return;
+  }
+  if (n > maxUsed) {
+    maxUsed = n;
+  }
+  if (n >= 512 && !file.isBusy()) {
+    // Not busy only allows one sector before possible busy wait.
+    // Write one sector from RingBuf to file.
+    if (512 != rb.writeOut(512)) {
+      Serial7.println("writeOut failed");
+      return;
+    }
+  }
 
-	if (!log_enable)
-		return;
+  if (!log_enable)
+    return;
 
-	rb.print(" ");
-	rb.print(timeStamp, 6);
-	rb.print("  ");
-	rb.print("1");
-	rb.print("      ");
-	rb.print(msg.id, HEX);
-	rb.print("  Rx d ");
-	rb.print(msg.len);
-	rb.print(" ");
-	for (uint8_t i = 0; i < msg.len; i++) {
-		rb.print(msg.buf[i], HEX);
-		rb.print(" ");
-	}
-	rb.println();
-	if (rb.getWriteError()) {
-		// Error caused by too few free bytes in RingBuf.
-		Serial.println("WriteError");
-		return;
-	}
+  rb.print(" ");
+  rb.print(timeStamp, 6);
+  rb.print("  ");
+  rb.print("1");
+  rb.print("      ");
+  rb.print(msg.id, HEX);
+  rb.print("  Rx d ");
+  rb.print(msg.len);
+  rb.print(" ");
+  for (uint8_t i = 0; i < msg.len; i++) {
+    rb.print(msg.buf[i], HEX);
+    rb.print(" ");
+  }
+  rb.println();
+  if (rb.getWriteError()) {
+    // Error caused by too few free bytes in RingBuf.
+    Serial7.println("WriteError");
+    return;
+  }
 }
 
 void sensorDataWrite(uint8_t sensortype) {
@@ -332,7 +398,7 @@ void sensorDataWrite(uint8_t sensortype) {
   size_t n = rb.bytesUsed();
   logFileSize = (uint32_t)n + (uint32_t)file.curPosition();
   if ((n + file.curPosition()) > (LOG_FILE_SIZE - 20)) {
-    Serial.println("File full - quiting.");
+    Serial7.println("File full - quiting.");
     return;
   }
   if (n > maxUsed) {
@@ -342,7 +408,7 @@ void sensorDataWrite(uint8_t sensortype) {
     // Not busy only allows one sector before possible busy wait.
     // Write one sector from RingBuf to file.
     if (512 != rb.writeOut(512)) {
-      Serial.println("writeOut failed");
+      Serial7.println("writeOut failed");
       return;
     }
   }
@@ -361,20 +427,20 @@ void sensorDataWrite(uint8_t sensortype) {
     memcpy(sensorData.buf,(uint8_t*)(&GPS_Location),sizeof(GPS_Location));
   }
  
-  Serial.print(" ");
-  Serial.print(timeStamp, 6);
-  Serial.print("  ");
-  Serial.print("1");
-  Serial.print("      ");
-  Serial.print(sensorData.id, HEX);
-  Serial.print("  Rx d ");
-  Serial.print(sensorData.len);
-  Serial.print(" ");
+  Serial7.print(" ");
+  Serial7.print(timeStamp, 6);
+  Serial7.print("  ");
+  Serial7.print("1");
+  Serial7.print("      ");
+  Serial7.print(sensorData.id, HEX);
+  Serial7.print("  Rx d ");
+  Serial7.print(sensorData.len);
+  Serial7.print(" ");
   for (uint8_t i = 0; i < sensorData.len; i++) {
-    Serial.print(sensorData.buf[i], HEX); Serial.print(" ");
-    Serial.print(" ");
+    Serial7.print(sensorData.buf[i], HEX); Serial7.print(" ");
+    Serial7.print(" ");
   }
-  Serial.println();
+  Serial7.println();
   
   rb.print(" ");
   rb.print(timeStamp, 6);
@@ -392,85 +458,89 @@ void sensorDataWrite(uint8_t sensortype) {
   rb.println();
   if (rb.getWriteError()) {
     // Error caused by too few free bytes in RingBuf.
-    Serial.println("WriteError");
+    Serial7.println("WriteError");
     return;
   }
 }
 
 void stopLogging()
 {
-	log_enable = false;
-	Serial.println("Stop Logging");
-	strcpy(disp_msg_2, "Stop Logging");
-	digitalWrite(LED_PIN, LOW);
-	rb.sync();
+  log_enable = false;
+  Serial7.println("Stop Logging");
+  strcpy(disp_msg_2, "Stop Logging");
+  digitalWrite(LED_PIN, LOW);
+  rb.sync();
 
-	file.truncate();
-	file.rewind();
-	Serial.print("fileSize: ");
-	Serial.println((uint32_t)file.fileSize());
-	Serial.print("maxBytesUsed: ");
-	Serial.println(maxUsed);
-	sprintf(disp_msg_4, "FileSize: %ld", (uint32_t)file.fileSize());
-	file.close();
+  file.truncate();
+  file.rewind();
+  Serial7.print("fileSize: ");
+  Serial7.println((uint32_t)file.fileSize());
+  Serial7.print("maxBytesUsed: ");
+  Serial7.println(maxUsed);
+  sprintf(disp_msg_4, "FileSize: %ld", (uint32_t)file.fileSize());
+  file.close();
 }
 
 void startLogging()
 {
-	log_enable = true;
-	Serial.println("Start Logging");
-	strcpy(disp_msg_2, "Start Logging");
-	digitalWrite(LED_PIN, HIGH);
-	elapselogtime = 0;
-	initSD_card();
+  log_enable = true;
+  Serial7.println("Start Logging");
+  strcpy(disp_msg_2, "Start Logging");
+  digitalWrite(LED_PIN, HIGH);
+  elapselogtime = 0;
+  initSD_card();
 }
 
 void parseGpsNmea()
 {
-  Serial.print(F("Location: ")); 
+  Serial7.print(F("Location: ")); 
   if (gps.location.isValid())
   {
     GPS_Location.gps_lat= (float)gps.location.lat();
-    Serial.print(GPS_Location.gps_lat,6);
-    Serial.print(F(","));
+    Serial7.print(GPS_Location.gps_lat,6);
+    Serial7.print(F(","));
     GPS_Location.gps_lng= (float)gps.location.lng();
-    Serial.print(GPS_Location.gps_lng, 6);
+    Serial7.print(GPS_Location.gps_lng, 6);
     sprintf(disp_msg_3, "lat: %.6f", GPS_Location.gps_lat);
     sprintf(disp_msg_4, "lng: %.6f", GPS_Location.gps_lng);
     sensorDataWrite(1);
   }
   else
   {
-    Serial.print(F("INVALID"));
+    Serial7.print(F("INVALID"));
   }
-  Serial.print(F("  Date/Time: "));
+
+  if(log_enable)
+    return;
+  
+  Serial7.print(F("  Date/Time: "));
   if (gps.date.isValid())
   {
-    Serial.print(gps.date.month());
-    Serial.print(F("/"));
-    Serial.print(gps.date.day());
-    Serial.print(F("/"));
-    Serial.print(gps.date.year());
+    Serial7.print(gps.date.month());
+    Serial7.print(F("/"));
+    Serial7.print(gps.date.day());
+    Serial7.print(F("/"));
+    Serial7.print(gps.date.year());
   }
   else
   {
-    Serial.print(F("INVALID"));
+    Serial7.print(F("INVALID"));
   }
 
-  Serial.print(F(" "));
+  Serial7.print(F(" "));
   if (gps.time.isValid())
   {
-    if (gps.time.hour() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.hour());
-    Serial.print(F(":"));
-    if (gps.time.minute() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.minute());
-    Serial.print(F(":"));
-    if (gps.time.second() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.second());
-    //Serial.print(F("."));
-    //if (gps.time.centisecond() < 10) Serial.print(F("0"));
-    //Serial.print(gps.time.centisecond());
+    if (gps.time.hour() < 10) Serial7.print(F("0"));
+    Serial7.print(gps.time.hour());
+    Serial7.print(F(":"));
+    if (gps.time.minute() < 10) Serial7.print(F("0"));
+    Serial7.print(gps.time.minute());
+    Serial7.print(F(":"));
+    if (gps.time.second() < 10) Serial7.print(F("0"));
+    Serial7.print(gps.time.second());
+    //Serial7.print(F("."));
+    //if (gps.time.centisecond() < 10) Serial7.print(F("0"));
+    //Serial7.print(gps.time.centisecond());
     
     sprintf(disp_msg_2, "%02d:%02d:%02d %02d/%02d/%04d", gps.time.hour(), gps.time.minute(), gps.time.second(), gps.date.day(), gps.date.month(), gps.date.year());
     if(!rtcSync)
@@ -478,8 +548,8 @@ void parseGpsNmea()
       setTime((int)gps.time.hour(),(int)gps.time.minute(),(int)gps.time.second(),(int)gps.date.day(), (int)gps.date.month(), (int)gps.date.year());
       time_t t= now()+19800;
       setTime(t);
-      Serial.print(" ...time:");
-      Serial.println(t);
+      Serial7.print(" ...time:");
+      Serial7.println(t);
       Teensy3Clock.set(t);
       rtcSync=true;
       
@@ -487,76 +557,160 @@ void parseGpsNmea()
   }
   else
   {
-    Serial.print(F("INVALID"));
+    Serial7.print(F("INVALID"));
   }
 
-  Serial.println();
+  Serial7.println();
   sprintf(disp_msg_5, "X: %d, Y: %d, Z: %d", mpu_6050_sensor.angleX_pitch,mpu_6050_sensor.angleY_roll,mpu_6050_sensor.angleX_pitch);
+}
+
+void storage_configure()
+{
+  Serial7.println("MTP_Start");
+  #if !__has_include("usb_mtp.h")
+     usb_mtp_configure();
+  #endif
+      
+  #if USE_SD==1
+    #if defined SD_SCK
+      SPI.setMOSI(SD_MOSI);
+      SPI.setMISO(SD_MISO);
+      SPI.setSCK(SD_SCK);
+    #endif
+
+    for(int ii=0; ii<nsd; ii++)
+    { 
+      #if defined(BUILTIN_SDCARD)
+        if(cs[ii] == BUILTIN_SDCARD)
+        {
+          if(!sdx[ii].sdfs.begin(SdioConfig(FIFO_SDIO))) 
+          { Serial7.printf("SDIO Storage %d %d %s failed or missing",ii,cs[ii],sd_str[ii]);  Serial7.println();
+          }
+          else
+          {
+            storage.addFilesystem(sdx[ii], sd_str[ii]);
+            uint64_t totalSize = sdx[ii].totalSize();
+            uint64_t usedSize  = sdx[ii].usedSize();
+            Serial7.printf("SDIO Storage %d %d %s ",ii,cs[ii],sd_str[ii]); 
+            Serial7.print(totalSize); Serial7.print(" "); Serial7.println(usedSize);
+          }
+        }
+        else if(cs[ii]<BUILTIN_SDCARD)
+      #endif
+      {
+        pinMode(cs[ii],OUTPUT); digitalWriteFast(cs[ii],HIGH);
+        if(!sdx[ii].sdfs.begin(SdSpiConfig(cs[ii], SHARED_SPI, SPI_SPEED))) 
+        { Serial7.printf("SD Storage %d %d %s failed or missing",ii,cs[ii],sd_str[ii]);  Serial7.println();
+        }
+        else
+        {
+          storage.addFilesystem(sdx[ii], sd_str[ii]);
+          uint64_t totalSize = sdx[ii].totalSize();
+          uint64_t usedSize  = sdx[ii].usedSize();
+          Serial7.printf("SD Storage %d %d %s ",ii,cs[ii],sd_str[ii]); 
+          Serial7.print(totalSize); Serial7.print(" "); Serial7.println(usedSize);
+        }
+      }
+    }
+    #endif
+}
+
+void checkButton(){
+  // check for button press
+  if ( digitalRead(TRIGGER_PIN) == LOW ) {
+    // poor mans debounce/press-hold, code not ideal for production
+    delay(50);
+    if( digitalRead(TRIGGER_PIN) == LOW ){
+      Serial7.println("Button Pressed");
+      
+      // still holding button for 3000 ms, reset settings, code not ideaa for production
+      delay(3000); // reset delay hold
+      if( digitalRead(TRIGGER_PIN) == LOW ){
+
+        if (log_enable)
+        {
+          stopLogging();
+        }
+        Serial7.println("Start MTP");
+        displayMsgOled_generic("MTP Service Started");
+        storage_configure();
+        mtp_enable=true;
+        mtpd.loop();
+        return;
+      }
+      
+      Serial7.println("Start/stop Logging");
+      if (!log_enable)
+      {
+        startLogging();
+      }
+      else
+      {
+        stopLogging();
+      }
+    }
+  }
 }
 
 
 void loop() {
 
+  if(mtp_enable)
+  {
+     mtpd.loop();
+     return;
+  }
+  
+  checkButton();
+  
   if (!log_enable)
   {
-    if (Serial.available()) {
+    if (Serial7.available()) {
       time_t t = processSyncMessage();
       if (t != 0) {
         Teensy3Clock.set(t); // set the RTC
         setTime(t);
-        Serial.println("Time Set Success!");
+        Serial7.println("Time Set Success!");
         
       }
     }
   }
   
-	Can0.events();
+  Can0.events();
   
   mpu.Execute();
   if((millis()-mpu6050_task)>100){ // print data every 100ms
-    //Serial.print("AngX = ");
+    //Serial7.print("AngX = ");
     mpu_6050_sensor.angleX_pitch=(int16_t)(mpu.GetAngX());
-    //Serial.print(mpu_6050_sensor.angleX_pitch);
-    //Serial.print("  AngY = ");
+    //Serial7.print(mpu_6050_sensor.angleX_pitch);
+    //Serial7.print("  AngY = ");
     mpu_6050_sensor.angleY_roll=(int16_t)(mpu.GetAngY());
-    //Serial.print(mpu_6050_sensor.angleY_roll);
-    //Serial.print("  AngZ = ");
+    //Serial7.print(mpu_6050_sensor.angleY_roll);
+    //Serial7.print("  AngZ = ");
     mpu_6050_sensor.angleZ_Yaw=(int16_t)(mpu.GetAngZ());
-    //Serial.println(mpu_6050_sensor.angleZ_Yaw);
+    //Serial7.println(mpu_6050_sensor.angleZ_Yaw);
     mpu6050_task = millis();
     sensorDataWrite(0);  
   }
+
+
   
-	logButton.update();
-	if (logButton.fallingEdge()) {
-		if (!log_enable)
-		{
-			startLogging();
-		}
-		else
-		{
-			stopLogging();
-		}
-
-	}
-
-
-	while (millis() > time_now + period) {
-		digitalClockDisplay();
-		if(log_enable)
-		{
+  while (millis() > time_now + period) {
+    digitalClockDisplay();
+    if(log_enable)
+    {
       int fsize = (int)((uint32_t)logFileSize/1024);
-			sprintf(disp_msg_4, "FileSize: %d Kb", fsize);
-			if (logFileSize >= LOG_FILE_SIZE_SD)
-			{
-				stopLogging();
-				startLogging();
-				newFileCount++;
-				sprintf(disp_msg_5, "NewFileCount: %d", newFileCount);
-			}
-		}
-		time_now = millis();
-	}
+      sprintf(disp_msg_4, "FileSize: %d Kb", fsize);
+      if (logFileSize >= LOG_FILE_SIZE_SD)
+      {
+        stopLogging();
+        startLogging();
+        newFileCount++;
+        sprintf(disp_msg_5, "NewFileCount: %ld", newFileCount);
+      }
+    }
+    time_now = millis();
+  }
 
   while (Serial2.available() > 0)
   {
