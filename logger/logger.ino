@@ -1,4 +1,5 @@
 #include <TimeLib.h>
+#include <Bounce.h>
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
@@ -8,7 +9,7 @@
 #include "MTP.h"
 #include <TinyGPSPlus.h>
 #include <TinyMPU6050.h>
-#include <FlexCAN_T4.h>  // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
+#include <FlexCAN_T4.h>   // if defined before SdFat.h and RingBuf.h Teensy will keep restart when initSD_card function called (Niladri) //
 
 #define USE_SD  1         // SDFAT based SDIO and SPI
 
@@ -85,6 +86,7 @@ FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can0;
 
 #define LOG_BTN  5
 #define LED_PIN  13
+#define BTN_TIMEOUT 3000
 
 SdFs sd;
 FsFile file;
@@ -102,9 +104,12 @@ unsigned long time_now = 0;
 uint32_t logFileSize = 0;
 uint32_t newFileCount = 0;
 
-#define TRIGGER_PIN LOG_BTN
-
+// Button Initialization //
+Bounce logButton = Bounce(LOG_BTN, 15); // 15 = 15 ms debounce time
 bool log_enable = false;
+bool triggerCommand = false;
+int logButton_state=0;
+long btn_duration=0;
 
 TinyGPSPlus gps;
 
@@ -327,25 +332,25 @@ void initSD_card()
 }
 
 void canSniff(const CAN_message_t& msg) {
-  //Serial7.print("MB "); Serial7.print(msg.mb);
-  //Serial7.print("  OVERRUN: "); Serial7.print(msg.flags.overrun);
-  //Serial7.print(" EXT: "); Serial7.print(msg.flags.extended);
-  //Serial7.print(" TS: "); Serial7.print(msg.timestamp);
-  Serial7.print(" ");
   double timeStamp = double((double)elapselogtime / 1000000);  //micros()
-  Serial7.print(timeStamp, 6);
-  Serial7.print("  ");
-  Serial7.print("1");
-  Serial7.print("      ");
-  Serial7.print(msg.id, HEX);
-  Serial7.print("  Rx d ");
-  Serial7.print(msg.len);
-  Serial7.print(" ");
-  for (uint8_t i = 0; i < msg.len; i++) {
-    Serial7.print(msg.buf[i], HEX); Serial7.print(" ");
+  if(!log_enable)
+  {
     Serial7.print(" ");
+    Serial7.print(timeStamp, 6);
+    Serial7.print("  ");
+    Serial7.print("1");
+    Serial7.print("      ");
+    Serial7.print(msg.id, HEX);
+    Serial7.print("  Rx d ");
+    Serial7.print(msg.len);
+    Serial7.print(" ");
+    for (uint8_t i = 0; i < msg.len; i++) {
+      Serial7.print(msg.buf[i], HEX); Serial7.print(" ");
+      Serial7.print(" ");
+    }
+    Serial7.println();
   }
-  Serial7.println();
+  
 
   size_t n = rb.bytesUsed();
   logFileSize = (uint32_t)n + (uint32_t)file.curPosition();
@@ -387,6 +392,7 @@ void canSniff(const CAN_message_t& msg) {
     Serial7.println("WriteError");
     return;
   }
+ 
 }
 
 void sensorDataWrite(uint8_t sensortype) {
@@ -427,21 +433,6 @@ void sensorDataWrite(uint8_t sensortype) {
     memcpy(sensorData.buf,(uint8_t*)(&GPS_Location),sizeof(GPS_Location));
   }
  
-  Serial7.print(" ");
-  Serial7.print(timeStamp, 6);
-  Serial7.print("  ");
-  Serial7.print("1");
-  Serial7.print("      ");
-  Serial7.print(sensorData.id, HEX);
-  Serial7.print("  Rx d ");
-  Serial7.print(sensorData.len);
-  Serial7.print(" ");
-  for (uint8_t i = 0; i < sensorData.len; i++) {
-    Serial7.print(sensorData.buf[i], HEX); Serial7.print(" ");
-    Serial7.print(" ");
-  }
-  Serial7.println();
-  
   rb.print(" ");
   rb.print(timeStamp, 6);
   rb.print("  ");
@@ -461,6 +452,22 @@ void sensorDataWrite(uint8_t sensortype) {
     Serial7.println("WriteError");
     return;
   }
+
+  /*Serial7.print(" ");
+  Serial7.print(timeStamp, 6);
+  Serial7.print("  ");
+  Serial7.print("1");
+  Serial7.print("      ");
+  Serial7.print(sensorData.id, HEX);
+  Serial7.print("  Rx d ");
+  Serial7.print(sensorData.len);
+  Serial7.print(" ");
+  for (uint8_t i = 0; i < sensorData.len; i++) {
+    Serial7.print(sensorData.buf[i], HEX); Serial7.print(" ");
+    Serial7.print(" ");
+  }
+  Serial7.println();*/
+  
 }
 
 void stopLogging()
@@ -493,21 +500,26 @@ void startLogging()
 
 void parseGpsNmea()
 {
-  Serial7.print(F("Location: ")); 
+  if(!log_enable)
+    Serial7.print(F("Location: ")); 
   if (gps.location.isValid())
   {
     GPS_Location.gps_lat= (float)gps.location.lat();
-    Serial7.print(GPS_Location.gps_lat,6);
-    Serial7.print(F(","));
     GPS_Location.gps_lng= (float)gps.location.lng();
-    Serial7.print(GPS_Location.gps_lng, 6);
     sprintf(disp_msg_3, "lat: %.6f", GPS_Location.gps_lat);
     sprintf(disp_msg_4, "lng: %.6f", GPS_Location.gps_lng);
+    if(!log_enable)
+    {
+      Serial7.print(GPS_Location.gps_lat,6);
+      Serial7.print(F(","));
+      Serial7.print(GPS_Location.gps_lng, 6);
+    }
     sensorDataWrite(1);
   }
   else
   {
-    Serial7.print(F("INVALID"));
+    if(!log_enable)
+      Serial7.print(F("INVALID"));
   }
 
   if(log_enable)
@@ -616,29 +628,32 @@ void storage_configure()
 }
 
 void checkButton(){
-  // check for button press
-  if ( digitalRead(TRIGGER_PIN) == LOW ) {
-    // poor mans debounce/press-hold, code not ideal for production
-    delay(50);
-    if( digitalRead(TRIGGER_PIN) == LOW ){
-      Serial7.println("Button Pressed");
-      
-      // still holding button for 3000 ms, reset settings, code not ideaa for production
-      delay(3000); // reset delay hold
-      if( digitalRead(TRIGGER_PIN) == LOW ){
 
-        if (log_enable)
-        {
-          stopLogging();
-        }
-        Serial7.println("Start MTP");
-        displayMsgOled_generic("MTP Service Started");
-        storage_configure();
-        mtp_enable=true;
-        mtpd.loop();
-        return;
+  logButton.update();
+  if ( logButton.read() != 1)
+  {
+    btn_duration = logButton.duration();
+    if(btn_duration>BTN_TIMEOUT && triggerCommand==false)
+    {
+      triggerCommand = true;
+      Serial7.println("Button pressed for more than 3 sec");
+      if (log_enable)
+      {
+        stopLogging();
       }
-      
+      Serial7.println("Start MTP");
+      displayMsgOled_generic("MTP Service Started");
+      storage_configure();
+      mtp_enable=true;
+      mtpd.loop();
+      return;
+    }
+  }
+  else if(logButton.read() == 1 && btn_duration>0)
+  {
+    if(btn_duration>15 && btn_duration<BTN_TIMEOUT)
+    {
+      Serial7.println("Button pressed");
       Serial7.println("Start/stop Logging");
       if (!log_enable)
       {
@@ -649,6 +664,7 @@ void checkButton(){
         stopLogging();
       }
     }
+    btn_duration = 0;
   }
 }
 
@@ -692,8 +708,6 @@ void loop() {
     mpu6050_task = millis();
     sensorDataWrite(0);  
   }
-
-
   
   while (millis() > time_now + period) {
     digitalClockDisplay();
