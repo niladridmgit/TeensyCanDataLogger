@@ -506,10 +506,11 @@ void parseGpsNmea()
   {
     GPS_Location.gps_lat= (float)gps.location.lat();
     GPS_Location.gps_lng= (float)gps.location.lng();
-    sprintf(disp_msg_3, "lat: %.6f", GPS_Location.gps_lat);
-    sprintf(disp_msg_4, "lng: %.6f", GPS_Location.gps_lng);
     if(!log_enable)
     {
+      sprintf(disp_msg_3, "lat: %.6f", GPS_Location.gps_lat);
+      sprintf(disp_msg_4, "lng: %.6f", GPS_Location.gps_lng);
+    
       Serial7.print(GPS_Location.gps_lat,6);
       Serial7.print(F(","));
       Serial7.print(GPS_Location.gps_lng, 6);
